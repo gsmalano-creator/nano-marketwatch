@@ -1,0 +1,22 @@
+# /etc/systemd/system/nano-marketwatch.service
+[Unit]
+Description=nano-marketwatch
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=marketwatch
+WorkingDirectory=/opt/nano-marketwatch
+EnvironmentFile=/opt/nano-marketwatch/.env
+ExecStart=/usr/bin/node src/server.js
+Restart=always
+RestartSec=5
+# The app holds no state worth protecting and needs no write access.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

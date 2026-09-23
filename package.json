@@ -1,0 +1,13 @@
+{
+	"name": "nano-marketwatch",
+	"version": "1.0.0",
+	"private": true,
+	"type": "module",
+	"description": "A page that watches two stocks, wired through every nano-api service",
+	"engines": { "node": ">=22" },
+	"scripts": {
+		"start": "node src/server.js",
+		"setup": "node setup.mjs",
+		"refresh": "node -e \"fetch(process.env.PUBLIC_URL + '/refresh', {method:'POST', headers:{'x-refresh-secret': process.env.REFRESH_SECRET}}).then(r=>r.text()).then(console.log)\""
+	}
+}
