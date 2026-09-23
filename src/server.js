@@ -182,9 +182,16 @@ const server = createServer(async (request, response) => {
 	const url = new URL(request.url, `http://${request.headers.host ?? "localhost"}`);
 
 	if (request.method === "GET" && url.pathname === "/") {
-		// Note: the page refreshes itself every 30s, so this counts renders
-		// rather than visitors. Honest name, honest number.
-		count(NAMES.pageLoads, "pageLoads");
+		// Only count real navigations. A browser asking for /favicon.ico that a
+		// proxy redirects here arrives with Sec-Fetch-Dest: image, and counting
+		// it would double every page load. The header survives redirects;
+		// its absence means a plain client such as curl.
+		const dest = request.headers["sec-fetch-dest"];
+		if (!dest || dest === "document") {
+			// The page refreshes itself every 30s, so this counts renders rather
+			// than visitors. Honest name, honest number.
+			count(NAMES.pageLoads, "pageLoads");
+		}
 		return send(response, 200, renderPage(state));
 	}
 
