@@ -8,6 +8,7 @@ const DEFAULT_BASES = {
 	relay: "https://relay.nano-api.com",
 	lock: "https://lock.nano-api.com",
 	config: "https://configmaps.nano-api.com",
+	count: "https://count.nano-api.com",
 };
 
 export class NanoError extends Error {
@@ -119,6 +120,21 @@ export class NanoApi {
 			body: { expected_interval_seconds: interval, grace_period_seconds: grace },
 		});
 		return data.monitor;
+	}
+
+	// --- NanoCount --------------------------------------------------------
+
+	/** Returns the new value, so the caller never has to read it back. */
+	async increment(name, by = 1) {
+		const query = by === 1 ? "" : `?by=${by}`;
+		const { data } = await this.request("count", `/v1/counters/${name}${query}`, { method: "POST" });
+		return data.counter;
+	}
+
+	async setCounter(name, value, label) {
+		const query = new URLSearchParams({ value: String(value), ...(label ? { label } : {}) });
+		const { data } = await this.request("count", `/v1/counters/${name}?${query}`, { method: "PUT" });
+		return data.counter;
 	}
 
 	// --- NanoRelay --------------------------------------------------------

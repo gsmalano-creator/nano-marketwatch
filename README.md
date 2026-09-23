@@ -27,9 +27,16 @@ nothing scheduled, guarded or configured inside the app itself.
 | **Lock** | One refresh at a time | Two instances, an overlapping slow run, or a restart mid-cycle would otherwise double-fetch |
 | **Config** | The tickers, and a kill switch | Change what is watched without a deploy, a restart, or an SSH session |
 | **Pulse** | A ping after every cycle | If the box dies, the loop wedges, or Relay stops calling, the missing ping is the alert |
+| **Count** | Page loads and Relay runs | Two numbers worth having, without a database or an analytics script |
 
-The page shows all four in a panel at the bottom: which config version it is on, whether it got
-the lock, which Relay run called it, and whether the ping went through.
+The page shows all five in a panel at the bottom: which config version it is on, whether it got
+the lock, which Relay run called it, whether the ping went through, and the last counter it
+touched. The footer carries the two totals.
+
+Counting is fire-and-forget: it must never slow down or break the thing it counts. The increment
+response carries the new value, so the page shows a number without ever reading the counter back.
+Note that `page-loads` counts *renders*, and the page refreshes itself every 30 seconds — an open
+tab keeps counting. Honest name, honest number.
 
 ## Setup
 

@@ -35,7 +35,7 @@ function plumbingRow(service, host, detail, state) {
 }
 
 export function renderPage(state) {
-	const { quotes, plumbing, lastRefresh, errors, config, configVersion, paused, basePath = "" } = state;
+	const { quotes, plumbing, lastRefresh, errors, config, configVersion, paused, basePath = "", counts = {} } = state;
 
 	return `<!doctype html>
 <html lang="en">
@@ -92,13 +92,16 @@ export function renderPage(state) {
 			plumbingRow("lock", "lock.nano-api.com", plumbing.lock.detail, plumbing.lock.state),
 			plumbingRow("relay", "relay.nano-api.com", plumbing.relay.detail, plumbing.relay.state),
 			plumbingRow("pulse", "pulse.nano-api.com", plumbing.pulse.detail, plumbing.pulse.state),
+			plumbingRow("count", "count.nano-api.com", plumbing.count.detail, plumbing.count.state),
 		].join("")}</tbody>
 	</table>
 
 	<footer>
 		watching ${escape((config.tickers ?? []).join(", ") || "nothing")} ·
 		config v${escape(configVersion ?? "?")} ·
-		<a href="${basePath}/api/state">json</a>
+		${counts.pageLoads === null ? "" : `${escape(counts.pageLoads)} page loads · `}${
+			counts.relayRuns === null ? "" : `${escape(counts.relayRuns)} relay runs · `
+		}<a href="${basePath}/api/state">json</a>
 	</footer>
 </main>
 </body>

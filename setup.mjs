@@ -83,7 +83,16 @@ console.log(
 	`pulse    ${monitor.slug} ${monitor.status}, every ${monitor.expected_interval_seconds}s + ${monitor.grace_period_seconds}s grace, due by ${monitor.alert_due_at}`,
 );
 
-// 4. Lock needs no provisioning: names are created on first acquire.
+// 4. Counters: created here so the badge URLs exist before anything is counted.
+for (const [name, label] of [
+	[NAMES.pageLoads, "page loads"],
+	[NAMES.relayRuns, "relay runs"],
+]) {
+	const counter = await nano.setCounter(name, 0, label);
+	console.log(`count    ${counter.name} = ${counter.value} · badge ${counter.badge_url}`);
+}
+
+// 5. Lock needs no provisioning: names are created on first acquire.
 console.log(`lock     ${NAMES.lock} will be created on the first refresh`);
 
 if (relayReady) {

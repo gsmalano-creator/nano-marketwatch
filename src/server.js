@@ -25,6 +25,7 @@ const idle = (detail = "not yet") => ({ state: "", detail });
 
 const state = {
 	basePath: BASE_PATH,
+	counts: { pageLoads: null, relayRuns: null },
 	quotes: [],
 	errors: [],
 	lastRefresh: null,
@@ -37,6 +38,7 @@ const state = {
 		lock: idle(),
 		relay: idle("waiting to be called"),
 		pulse: idle(),
+		count: idle(),
 	},
 };
 
@@ -154,6 +156,23 @@ async function pulse(payload) {
 	}
 }
 
+/**
+ * Counting must never slow down or break what it counts, so this is
+ * fire-and-forget. The response carries the new value, so the page can show a
+ * number without ever reading the counter back.
+ */
+function count(name, field) {
+	nano
+		.increment(name)
+		.then((counter) => {
+			state.counts[field] = counter.value;
+			state.plumbing.count = { state: "ok", detail: `${counter.name} → ${counter.value}` };
+		})
+		.catch((error) => {
+			state.plumbing.count = { state: "warn", detail: `increment failed: ${error.message}` };
+		});
+}
+
 function send(response, status, body, type = "text/html; charset=utf-8") {
 	response.writeHead(status, { "content-type": type, "cache-control": "no-store" });
 	response.end(body);
@@ -163,6 +182,9 @@ const server = createServer(async (request, response) => {
 	const url = new URL(request.url, `http://${request.headers.host ?? "localhost"}`);
 
 	if (request.method === "GET" && url.pathname === "/") {
+		// Note: the page refreshes itself every 30s, so this counts renders
+		// rather than visitors. Honest name, honest number.
+		count(NAMES.pageLoads, "pageLoads");
 		return send(response, 200, renderPage(state));
 	}
 
@@ -180,6 +202,7 @@ const server = createServer(async (request, response) => {
 			return send(response, 401, JSON.stringify({ error: "bad refresh secret" }), "application/json");
 		}
 		const trigger = request.headers["x-nanorelay-run-id"] ? "relay" : "manual";
+		if (trigger === "relay") count(NAMES.relayRuns, "relayRuns");
 		state.plumbing.relay = {
 			state: "ok",
 			detail:
