@@ -26,6 +26,7 @@ const SOURCES = [
 	["locks", "/v1/locks", "locks"],
 	["configs", "/v1/configs", "configs"],
 	["counters", "/v1/counters", "counters"],
+	["uniq", "/v1/uniq", "keys"],
 ];
 
 /**
@@ -103,9 +104,12 @@ export function renderPanel({ data, at, basePath = "", readKeyConfigured }) {
 		section("Configs", ["name", "version", "keys", "updated"], data.configs,
 			(c) => `<tr>${cell(c.name, "svc")}${cell(`v${c.version}`)}${cell(c.keys, "num")}${cell(ago(c.updated_at))}</tr>`,
 			"none"),
-		section("Counters", ["name", "value", "label", "updated"], data.counters,
-			(c) => `<tr>${cell(c.name, "svc")}${cell(c.value, "num")}${cell(c.label ?? "-")}${cell(ago(c.updated_at))}</tr>`,
+		section("Counters", ["name", "value", "kind", "label", "updated"], data.counters,
+			(c) => `<tr>${cell(c.name, "svc")}${cell(c.value, "num")}${cell(c.monotonic ? "sequence" : "tally", c.monotonic ? "state ok" : "")}${cell(c.label ?? "-")}${cell(ago(c.updated_at))}</tr>`,
 			"none"),
+		section("Seen keys", ["key", "hits", "first seen", "expires"], data.uniq,
+			(u) => `<tr>${cell(u.key, "svc")}${cell(u.hits, "num")}${cell(ago(u.first_seen_at))}${cell(ago(u.expires_at))}</tr>`,
+			"none — this app does not use uniq"),
 	].join("");
 
 	return page(
