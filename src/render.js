@@ -1,50 +1,4 @@
-const escape = (value) =>
-	String(value).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
-
-const money = (value, currency) =>
-	new Intl.NumberFormat("en-US", { style: "currency", currency, maximumFractionDigits: 2 }).format(value);
-
-const ago = (iso) => {
-	if (!iso) return "never";
-	const seconds = Math.round((Date.now() - Date.parse(iso)) / 1000);
-	if (seconds < 90) return `${seconds}s ago`;
-	if (seconds < 5400) return `${Math.round(seconds / 60)}m ago`;
-	return `${Math.round(seconds / 3600)}h ago`;
-};
-
-function quoteCard(quote) {
-	const up = quote.change >= 0;
-	return `
-			<div class="quote ${up ? "up" : "down"}">
-				<p class="symbol">${escape(quote.symbol)}</p>
-				<p class="price">${escape(money(quote.price, quote.currency))}</p>
-				<p class="change">${up ? "▲" : "▼"} ${escape(money(Math.abs(quote.change), quote.currency))}
-					<span>(${up ? "+" : "−"}${Math.abs(quote.changePercent).toFixed(2)}%)</span></p>
-				<p class="prev">prev close ${escape(money(quote.previousClose, quote.currency))}</p>
-			</div>`;
-}
-
-/** The plumbing panel is the point of the app: it shows what each service did. */
-function plumbingRow(service, host, detail, state) {
-	return `
-				<tr>
-					<td class="svc">${escape(service)}</td>
-					<td class="host">${escape(host)}</td>
-					<td class="state ${escape(state)}">${escape(detail)}</td>
-				</tr>`;
-}
-
-export function renderPage(state) {
-	const { quotes, plumbing, lastRefresh, errors, config, configVersion, paused, basePath = "", counts = {} } = state;
-
-	return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="30">
-<title>marketwatch</title>
-<style>
+export const STYLE = `
 	:root { --bg:#0b0f14; --surface:#111822; --border:#223041; --text:#e7eef6; --muted:#9bacc0;
 		--up:#35d399; --down:#fb7185; --mono: ui-monospace, SFMono-Regular, Menlo, monospace; }
 	* { box-sizing: border-box; }
@@ -73,7 +27,75 @@ export function renderPage(state) {
 	.state.ok { color:var(--up); } .state.warn { color:#fbbf5c; } .state.bad { color:var(--down); }
 	footer { margin-top:2rem; color:var(--muted); font-size:.7rem; }
 	a { color:#7cc9f0; }
-</style>
+`;
+
+export const escape = (value) =>
+	String(value).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+const money = (value, currency) =>
+	new Intl.NumberFormat("en-US", { style: "currency", currency, maximumFractionDigits: 2 }).format(value);
+
+/**
+ * Relative time in both directions. The front page only ever passes a past
+ * timestamp, but the panel shows deadlines and next runs, and "-51s ago" is
+ * not a way to say "in 51 seconds".
+ */
+export const ago = (iso) => {
+	if (!iso) return "never";
+	const delta = Math.round((Date.now() - Date.parse(iso)) / 1000);
+	if (!Number.isFinite(delta)) return "-";
+	const seconds = Math.abs(delta);
+	const value =
+		seconds < 90
+			? `${seconds}s`
+			: seconds < 5400
+				? `${Math.round(seconds / 60)}m`
+				: seconds < 172800
+					? `${Math.round(seconds / 3600)}h`
+					: `${Math.round(seconds / 86400)}d`;
+	return delta < 0 ? `in ${value}` : `${value} ago`;
+};
+
+function quoteCard(quote) {
+	const up = quote.change >= 0;
+	return `
+			<div class="quote ${up ? "up" : "down"}">
+				<p class="symbol">${escape(quote.symbol)}</p>
+				<p class="price">${escape(money(quote.price, quote.currency))}</p>
+				<p class="change">${up ? "▲" : "▼"} ${escape(money(Math.abs(quote.change), quote.currency))}
+					<span>(${up ? "+" : "−"}${Math.abs(quote.changePercent).toFixed(2)}%)</span></p>
+				<p class="prev">prev close ${escape(money(quote.previousClose, quote.currency))}</p>
+			</div>`;
+}
+
+/** The plumbing panel is the point of the app: it shows what each service did. */
+function plumbingRow(service, host, detail, state) {
+	return `
+				<tr>
+					<td class="svc">${escape(service)}</td>
+					<td class="host">${escape(host)}</td>
+					<td class="state ${escape(state)}">${escape(detail)}</td>
+				</tr>`;
+}
+
+export function renderPage(state) {
+	const { quotes, plumbing, lastRefresh, errors, config, configVersion, paused, basePath = "", counts = {}, movers = [] } = state;
+
+	// The threshold lives in NanoConfig, so a reader can see what the number
+	// currently is and that it is not baked into this page.
+	const threshold =
+		typeof config.move_alert_percent === "number" && config.move_alert_percent > 0
+			? `${config.move_alert_percent}%`
+			: "off";
+
+	return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="30">
+<title>marketwatch</title>
+<style>${STYLE}</style>
 </head>
 <body>
 <main>
@@ -83,6 +105,15 @@ export function renderPage(state) {
 
 	${paused ? `<p class="banner warn">Paused by config v${escape(configVersion)} — prices are not being refreshed.</p>` : ""}
 	${errors.length ? `<p class="banner warn">${escape(errors.join(" · "))}</p>` : ""}
+	${
+		movers.length
+			? `<p class="banner warn">Over threshold: ${escape(
+					movers
+						.map((m) => `${m.symbol} ${m.changePercent >= 0 ? "+" : "−"}${Math.abs(m.changePercent).toFixed(2)}% (>${m.threshold}%)`)
+						.join(" · "),
+				)}</p>`
+			: ""
+	}
 	${quotes.length === 0 && !paused ? `<p class="banner">No quotes yet. Waiting for the first refresh.</p>` : ""}
 
 	<table>
@@ -93,15 +124,25 @@ export function renderPage(state) {
 			plumbingRow("relay", "relay.nano-api.com", plumbing.relay.detail, plumbing.relay.state),
 			plumbingRow("pulse", "pulse.nano-api.com", plumbing.pulse.detail, plumbing.pulse.state),
 			plumbingRow("count", "count.nano-api.com", plumbing.count.detail, plumbing.count.state),
+			plumbingRow("this app", "own webhook", plumbing.alerts.detail, plumbing.alerts.state),
 		].join("")}</tbody>
 	</table>
 
 	<footer>
 		watching ${escape((config.tickers ?? []).join(", ") || "nothing")} ·
-		config v${escape(configVersion ?? "?")} ·
-		${counts.pageLoads === null ? "" : `${escape(counts.pageLoads)} page loads · `}${
-			counts.relayRuns === null ? "" : `${escape(counts.relayRuns)} relay runs · `
-		}<a href="${basePath}/api/state">json</a>
+		alert over ${escape(threshold)} ·
+		config v${escape(configVersion ?? "?")}<br>
+		${[
+			counts.pageLoads === null ? null : `${counts.pageLoads} renders`,
+			counts.relayRuns === null ? null : `${counts.relayRuns} relay runs`,
+			counts.quoteFailures === null ? null : `${counts.quoteFailures} quote failures`,
+			counts.moveAlerts === null ? null : `${counts.moveAlerts} move alerts`,
+		]
+			.filter(Boolean)
+			.map(escape)
+			.join(" · ")} ·
+		<a href="${basePath}/panel">what nano-api holds</a> ·
+		<a href="${basePath}/api/state">json</a>
 	</footer>
 </main>
 </body>

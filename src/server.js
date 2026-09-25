@@ -1,7 +1,9 @@
 import { createServer } from "node:http";
 import { hostname } from "node:os";
 import { NanoApi, NanoError } from "./nano.js";
-import { basesFromEnv, DEFAULT_CONFIG, NAMES } from "./settings.js";
+import { alertThreshold, basesFromEnv, DEFAULT_CONFIG, NAMES } from "./settings.js";
+import { postAlert } from "./alerts.js";
+import { readPanel, renderPanel } from "./panel.js";
 import { fetchQuotes } from "./quotes.js";
 import { renderPage } from "./render.js";
 
@@ -19,13 +21,21 @@ const HEARTBEAT_SECONDS = Number(process.env.HEARTBEAT_SECONDS ?? 30);
 // having stopped calling altogether.
 const STALE_AFTER_SECONDS = Number(process.env.STALE_AFTER_SECONDS ?? 1200);
 const REFRESH_ON_START = process.env.REFRESH_ON_START !== "false";
+// Where this app sends its own alerts. Pulse and Relay have their own webhooks,
+// configured in setup.mjs; this one is for a price move, which only this app
+// can judge.
+const ALERT_WEBHOOK_URL = process.env.ALERT_WEBHOOK_URL ?? "";
+// Renders are counted in memory and flushed on this interval rather than one
+// write per request. See flushRenders().
+const COUNT_FLUSH_SECONDS = Number(process.env.COUNT_FLUSH_SECONDS ?? 60);
 
 
 const idle = (detail = "not yet") => ({ state: "", detail });
 
 const state = {
 	basePath: BASE_PATH,
-	counts: { pageLoads: null, relayRuns: null },
+	counts: { pageLoads: null, relayRuns: null, quoteFailures: null, moveAlerts: null },
+	movers: [],
 	quotes: [],
 	errors: [],
 	lastRefresh: null,
@@ -39,10 +49,18 @@ const state = {
 		relay: idle("waiting to be called"),
 		pulse: idle(),
 		count: idle(),
+		alerts: idle(),
 	},
 };
 
 const nano = new NanoApi({ key: process.env.NANO_API_KEY, bases: basesFromEnv() });
+
+// A second key, for the one thing that only reads. Least privilege in a real
+// app rather than in a paragraph: /panel cannot delete a monitor even if the
+// key it uses leaks, because the key it uses cannot write at all.
+const READ_KEY = process.env.NANO_READ_KEY ?? "";
+const reader = READ_KEY ? new NanoApi({ key: READ_KEY, bases: basesFromEnv() }) : null;
+
 const owner = hostname();
 
 /**
@@ -99,6 +117,9 @@ async function refresh(trigger) {
 
 		const { quotes, errors } = await fetchQuotes(state.config.tickers ?? []);
 		state.errors = errors;
+		// A number that means something: how often the quote source let us down.
+		// Rare enough to deserve a write of its own.
+		if (errors.length > 0) count(NAMES.quoteFailures, "quoteFailures");
 		if (quotes.length > 0) {
 			// Only a run that produced data counts as fresh; a run where every
 			// quote failed must age out like no run at all.
@@ -106,9 +127,13 @@ async function refresh(trigger) {
 			state.lastRefresh = new Date().toISOString();
 		}
 
+		// Config decides the threshold, so this has to run after the read above.
+		await checkMoves(quotes);
+
 		await pulse({
 			trigger,
 			tickers: state.config.tickers,
+			movers: state.movers.length,
 			quotes: quotes.length,
 			errors: errors.length,
 			duration_ms: Date.now() - startedAt,
@@ -160,6 +185,9 @@ async function pulse(payload) {
  * Counting must never slow down or break what it counts, so this is
  * fire-and-forget. The response carries the new value, so the page can show a
  * number without ever reading the counter back.
+ *
+ * Use this for things that happen once in a while. Renders are not one of
+ * those: see flushRenders().
  */
 function count(name, field) {
 	nano
@@ -171,6 +199,101 @@ function count(name, field) {
 		.catch((error) => {
 			state.plumbing.count = { state: "warn", detail: `increment failed: ${error.message}` };
 		});
+}
+
+/**
+ * Renders are buffered here instead of writing one increment per request.
+ *
+ * The page reloads itself every 30 seconds, so one open tab used to mean two
+ * writes a minute to a database shared with every other nano-api customer.
+ * A few hundred readers at once would have made this demo the heaviest writer
+ * on the platform it is demonstrating. Now a minute of traffic is one write,
+ * however many renders it contained.
+ */
+let pendingRenders = 0;
+
+async function flushRenders() {
+	if (pendingRenders === 0) return;
+
+	// `by` is capped at 1000 per call, so a burst goes out in chunks. Anything
+	// left over stays buffered for the next tick rather than being dropped, and
+	// the chunk limit keeps a spike from turning into a burst of requests.
+	const MAX_STEP = 1000;
+	const MAX_CHUNKS = 5;
+	let sent = 0;
+
+	try {
+		for (let chunk = 0; chunk < MAX_CHUNKS && pendingRenders > 0; chunk += 1) {
+			const by = Math.min(pendingRenders, MAX_STEP);
+			const counter = await nano.increment(NAMES.pageLoads, by);
+			// Only drop what the server confirmed it took.
+			pendingRenders -= by;
+			sent += by;
+			state.counts.pageLoads = counter.value;
+		}
+		state.plumbing.count = {
+			state: "ok",
+			detail: `${NAMES.pageLoads} +${sent} → ${state.counts.pageLoads}`,
+		};
+	} catch (error) {
+		// The buffer keeps the unsent renders, so a blip costs latency, not data.
+		state.plumbing.count = {
+			state: "warn",
+			detail: `flush failed, ${pendingRenders} buffered: ${error.message}`,
+		};
+	}
+}
+
+/**
+ * A price move is this app's own judgement, not something Pulse or Relay can
+ * see, so this app posts it. Alerts fire on the transition into the band and
+ * again on the way out, never once per refresh cycle — the same rule the
+ * nano-api services use, for the same reason: nobody needs the same news every
+ * fifteen minutes.
+ */
+const alerted = new Map();
+
+async function checkMoves(quotes) {
+	const movers = [];
+	const seen = new Set();
+
+	for (const quote of quotes) {
+		seen.add(quote.symbol);
+		const threshold = alertThreshold(state.config, quote.symbol);
+		if (threshold === null) continue;
+
+		const move = Math.abs(quote.changePercent);
+		const over = move >= threshold;
+		const was = alerted.get(quote.symbol) ?? false;
+		if (over) movers.push({ symbol: quote.symbol, changePercent: quote.changePercent, threshold });
+		if (over === was) continue;
+
+		alerted.set(quote.symbol, over);
+		const direction = quote.changePercent >= 0 ? "up" : "down";
+		const text = over
+			? `🔴 ${quote.symbol} is ${direction} ${move.toFixed(2)}% today (threshold ${threshold}%).`
+			: `🟢 ${quote.symbol} is back inside ${threshold}% (${move.toFixed(2)}% today).`;
+
+		try {
+			const result = await postAlert(ALERT_WEBHOOK_URL, text);
+			if (result.sent) count(NAMES.moveAlerts, "moveAlerts");
+		} catch (error) {
+			state.plumbing.alerts = { state: "warn", detail: `webhook failed: ${error.message}` };
+		}
+	}
+
+	// A ticker removed from config should not keep its old verdict around.
+	for (const symbol of [...alerted.keys()]) if (!seen.has(symbol)) alerted.delete(symbol);
+
+	state.movers = movers;
+	state.plumbing.alerts = ALERT_WEBHOOK_URL
+		? {
+				state: movers.length ? "warn" : "ok",
+				detail: movers.length
+					? movers.map((m) => `${m.symbol} ${m.changePercent >= 0 ? "+" : ""}${m.changePercent.toFixed(2)}%`).join(", ")
+					: "nothing over threshold",
+			}
+		: { state: "warn", detail: "no ALERT_WEBHOOK_URL set" };
 }
 
 function send(response, status, body, type = "text/html; charset=utf-8") {
@@ -189,10 +312,27 @@ const server = createServer(async (request, response) => {
 		const dest = request.headers["sec-fetch-dest"];
 		if (!dest || dest === "document") {
 			// The page refreshes itself every 30s, so this counts renders rather
-			// than visitors. Honest name, honest number.
-			count(NAMES.pageLoads, "pageLoads");
+			// than visitors. Honest name, honest number. Buffered, not written:
+			// flushRenders() turns a minute of them into one request.
+			pendingRenders += 1;
 		}
 		return send(response, 200, renderPage(state));
+	}
+
+	if (request.method === "GET" && url.pathname === "/panel") {
+		if (!reader) {
+			return send(response, 200, renderPanel({ basePath: BASE_PATH, readKeyConfigured: false }));
+		}
+		try {
+			const panel = await readPanel(reader);
+			return send(
+				response,
+				200,
+				renderPanel({ ...panel, basePath: BASE_PATH, readKeyConfigured: true }),
+			);
+		} catch (error) {
+			return send(response, 502, `panel unavailable: ${error.message}`, "text/plain");
+		}
 	}
 
 	if (request.method === "GET" && url.pathname === "/api/state") {
@@ -245,6 +385,13 @@ server.listen(PORT, () => {
 		setInterval(() => {
 			pulse({ trigger: "heartbeat" }).catch(() => {});
 		}, HEARTBEAT_SECONDS * 1000);
+	}
+
+	if (COUNT_FLUSH_SECONDS > 0) {
+		console.log(`flushing render count every ${COUNT_FLUSH_SECONDS}s`);
+		setInterval(() => {
+			flushRenders().catch(() => {});
+		}, COUNT_FLUSH_SECONDS * 1000);
 	}
 
 	if (FALLBACK_POLL_SECONDS > 0) {

@@ -114,10 +114,14 @@ export class NanoApi {
 
 	/** interval and grace are only read when a monitor is created, so an
 	 *  existing one has to be told explicitly. */
-	async setMonitorWindow(slug, { interval, grace }) {
+	async setMonitorWindow(slug, { interval, grace, alertWebhookUrl }) {
 		const { data } = await this.request("pulse", `/v1/monitors/${slug}`, {
 			method: "PATCH",
-			body: { expected_interval_seconds: interval, grace_period_seconds: grace },
+			body: {
+				expected_interval_seconds: interval,
+				grace_period_seconds: grace,
+				...(alertWebhookUrl === undefined ? {} : { alert_webhook_url: alertWebhookUrl }),
+			},
 		});
 		return data.monitor;
 	}
@@ -146,9 +150,13 @@ export class NanoApi {
 			allow: [409],
 		});
 		if (status === 409) {
+			const patch = { cron: schedule.cron, url: schedule.url, headers: schedule.headers };
+			if (schedule.alert_webhook_url !== undefined) {
+				patch.alert_webhook_url = schedule.alert_webhook_url;
+			}
 			const { data: updated } = await this.request("relay", `/v1/schedules/${schedule.slug}`, {
 				method: "PATCH",
-				body: { cron: schedule.cron, url: schedule.url, headers: schedule.headers },
+				body: patch,
 			});
 			return { schedule: updated.schedule, existed: true };
 		}
